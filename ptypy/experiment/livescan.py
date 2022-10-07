@@ -1,6 +1,4 @@
 """
-Copied LiveScan(PtyScan) from local file 'v4_livescan_inprogress.py'
-
 Current state: In progress, not checked to work yet.
                 Connects to directly to streamer
 
@@ -187,17 +185,17 @@ class LiveScan(PtyScan):
     default = LiveScan
     help =
 
-    [host]
-    default = 'tcp://b-nanomax-controlroom-cc-3'
+    [relay_host]
+    default = 'tcp://127.0.0.1'
     type = str
     help = Name of the publishing host
-    doc =  contrast
+    doc =
 
-    [port]
-    default = 5556
+    [relay_port]
+    default = 45678
     type = int
     help = Port number on the publishing host
-    doc = # tcp://b-nanomax-controlroom-cc-3:5556 eller om det inte funkar e.g på clustret: 172.16.125.30 (for motor daata stuff)
+    doc =
 
     [xMotor]
     default = sx
@@ -215,24 +213,8 @@ class LiveScan(PtyScan):
     default = 'diff'
     type = str
     help = Which detector from the contrast stream to use
-
-    [detector_host]
-    default = "tcp://b-daq-node-2"
-    type = str
-    help = Take images from a separate stream - hostname
-    doc = streaming-reciever at gitlab, info available at https://wiki.maxiv.lu.se/index.php/NanoMAX:Dectris_-_Eiger2_X4M ...host and port for detector is the "secondary zmq port for arbitrary processing"
-
-    [detector_port]
-    default = 20001
-    type = int
-    help = Take images from a separate stream - port
-    doc = Default is the port used by NanoMax Eiger4M
-
-    [block_wait_count]
-    default = 0
-    type = int
-    help = Signals a WAIT to the model after this many blocks.
     """
+
 
     def __init__(self, pars=None, **kwargs):
 
@@ -244,28 +226,14 @@ class LiveScan(PtyScan):
         p.update(kwargs)
 
         super(LiveScan, self).__init__(p, **kwargs)
+
+        # main socket: reporting images, positions and motor stuff from RelayServer
         self.context = zmq.Context()
+        self.socket = self.context.socket(zmq.REQ)
+        self.socket.connect("%s:%u" % (self.info.relay_host, self.info.relay_port))
 
-        # main socket, reporting positions and motor stuff from contrast
-        socket = self.context.socket(zmq.SUB)
-        socket.connect("%s:%u" % (self.info.host, self.info.port))
-        socket.setsockopt(zmq.SUBSCRIBE, b"")  # subscribe to all topics
-        self.socket = socket
-
-        # separate detector socket
-        self.stream_images = None not in (self.info.detector_host,
-                                          self.info.detector_port)
-        if self.stream_images and parallel.master:
-            det_socket = self.context.socket(zmq.PULL)
-            det_socket.connect("%s:%u" % (self.info.detector_host, self.info.detector_port))
-            self.det_socket = det_socket
-
-        self.latest_pos_index_received = -1 ## ToDo: check if these 2 should be in the beginning of check() instead
-        self.latest_det_index_received = -1
-        self.incoming = {}
-        self.incoming_det = {}
         self.end_of_scan = False
-        self.end_of_det_stream = False ## ToDo: check if this one is neccesary to implement
+        self.latest_frame_index_received = -1
         self.checknr = 0
         self.loadnr = 0
         self.checktottime = 0
@@ -290,156 +258,64 @@ class LiveScan(PtyScan):
         t0 = time.perf_counter()
         self.checknr += 1
         logger.info('check() has now been called %d times.' % self.checknr)  ##
-        ##OnMyMac## backtrace(f'/Users/lexelius/Documents/Contrast/contrast-master/experimental-data/livescan_output/poditstats_{self.t}.txt')
-        backtrace(f'/home/reblex/Documents/Reconstructions/livescan_output/poditstats_{self.t}.txt')
 
-        # To pause the data acquiring in hope of starting iterations earlier
-        bwc = self.p.block_wait_count
-        if bwc >= 1 and self.checknr % (bwc + 1) == 0:  ## ToDo: Make a better solution than using self.checknr
-            frames_accessible = 0
-            return frames_accessible, self.end_of_scan
+        self.socket.send_json(['check'])
+        msg = self.socket.recv_json()
+        if isinstance(msg, dict):
+            self.meta.energy = np.float64([msg['energy']]) * 1e-3  ## Read energy from beamline snapshot
+        else:
+            logger.info('#### check message = %s' % msg)
+            frames_accessible_tot = msg[0]
+            self.latest_frame_index_received = frames_accessible_tot - 1 # could also set this to =msg[0] and delete the "+1" in the return..
+            self.end_of_scan = msg[1]
 
+        if self.latest_frame_index_received < self.info.min_frames * parallel.size:
+            logger.info('have %u frames, waiting...' % (self.latest_frame_index_received + 1))
+            time.sleep(0.5)
+            self.check(frames=frames, start=start)
 
-        # get all frames from the main socket
-        while True:
-            try:
-                msg = self.socket.recv_pyobj(flags=zmq.NOBLOCK)  ## NOBLOCK returns None if a message is not ready
-                logger.info('######## Received a message')  ##
-                ##headers = ('path' in msg.keys())
-                ##emptymsg = ('heartbeat' in msg.values()) # just a message from contrast to keep connection alive
-                ######if 'running' in msg.values():  # if zmq did not send a path: then save this message
-                if msg['status'] == 'started':
-                    self.meta.energy = np.float64([msg['snapshot']['energy']]) * 1e-3 ## Read energy from beamline snapshot
-                    logger.info('############ RecorderHeader received; SCAN STARTING!')  ##
-                elif msg['status'] == 'running':
-                    self.latest_pos_index_received += 1
-                    self.incoming[self.latest_pos_index_received] = msg
-                    logger.info('############ Frame nr. %d received' % self.latest_pos_index_received)  ##
-                    break ## include this break if you want to start iterations befora all frames have been acquired
-                elif msg['status'] == 'finished': ## 'msgEOS':  # self.EOS:
-                    self.end_of_scan = True
-                    logger.info('############ RecorderFooter received; END OF SCAN!')  ##
-                    break
-                else:
-                    logger.info('############ Message was not important')  ##
-            except zmq.ZMQError:
-                logger.info('######## Waiting for messages')  #w2#
-                # no more data available - working around bug in ptypy here
-                if self.latest_pos_index_received < self.info.min_frames * parallel.size:
-                    logger.info('############ self.latest_pos_index_received = %u , self.info.min_frames = %d , parallel.size = %d' % (self.latest_pos_index_received, self.info.min_frames, parallel.size))  ##
-                    logger.info('############ Not enough frames received, have %u frames, waiting...' % (self.latest_pos_index_received + 1))
-                    time.sleep(1)
-                else:
-                    logger.info('############ Will process gathered data')  ##
-                    break
-
-        # get all frames from the detector socket
-        while self.stream_images:
-            try:
-                parts = self.det_socket.recv_multipart(flags=zmq.NOBLOCK)
-                info = json.loads(parts[0])
-                shape = info['shape']
-                dtype = np.dtype(info['type'])
-                img = decompress(parts[1], shape, dtype)
-                self.latest_det_index_received += 1
-                self.incoming_det[self.latest_det_index_received] = img
-
-            except zmq.ZMQError:
-                # no more data available - working around bug in ptypy here
-                if self.latest_det_index_received < self.info.min_frames * parallel.size:
-                    logger.info('have %u detector frames, waiting...' % (self.latest_det_index_received + 1))
-                    time.sleep(.5)
-                else:
-                    break
-
-        ind = self.latest_pos_index_received
-        logger.info('#### latest_pos_index_received = %d' % ind)
-        if self.stream_images:
-            ind = min(ind, self.latest_det_index_received)
-            logger.info('#### latest_det_index_received = %d' % self.latest_det_index_received)
-        logger.info('#### check return (ind - start + 1) = %d, self.end_of_scan = %d' % ((ind - start + 1), self.end_of_scan))
+        logger.info('#### check return (self.latest_frame_index_received - start + 1), self.end_of_scan  =  (%d - %d + 1), %s' % (self.latest_frame_index_received, start, self.end_of_scan))
         t1 = time.perf_counter()
         self.checktottime += t1-t0
         logger.info('#### Time spent in check = %f, accumulated time = %f' % ((t1-t0), self.checktottime))
         logger.info(headerline('', 'c', '#'))
         logger.info(headerline('Leaving LiveScan().check()', 'c', '#'))
         logger.info(headerline('', 'c', '#') + '\n')
-        return (ind - start + 1), (self.end_of_scan and self.end_of_det_stream)
+        return (self.latest_frame_index_received - start + 1), self.end_of_scan
+
 
     def load(self, indices):
-        # indices are generated by PtyScan's _mpi_indices method.
-        # It is a diffraction data index lists that determine
-        # which node contains which data.
+        """indices are generated by PtyScan's _mpi_indices method.
+        It is a diffraction data index lists that determine
+        which node contains which data."""
         raw, weight, pos = {}, {}, {}
         logger.info(headerline('', 'c', '#'))
         logger.info(headerline('Entering LiveScan().load()', 'c', '#'))
         logger.info(headerline('', 'c', '#'))
         t0 = time.perf_counter()
         self.loadnr += 1
-        logger.info('load() has now been called %d times.' % self.loadnr)  ##
-        ##OnMyMac## backtrace(f'/Users/lexelius/Documents/Contrast/contrast-master/experimental-data/livescan_output/poditstats_{self.t}.txt')
-        backtrace(f'/home/reblex/Documents/Reconstructions/livescan_output/poditstats_{self.t}.txt')
+        logger.info('load() has now been called %d times.' % self.loadnr)
 
-        # communication
-        if parallel.master:
-            # send data to each node
-            for node in range(1, parallel.size):
-                node_inds = parallel.receive(source=node)
-                dct = {i:self.incoming[i] for i in node_inds}
-                if self.stream_images: ## added fo separate streams
-                    # merge streamed images
-                    for i in node_inds: ## added fo separate streams
-                        dct[i][self.info.detector] = self.incoming_det[i] ## added fo separate streams
-                parallel.send(dct, dest=node)
-                for i in node_inds:
-                    del self.incoming[i]
-                    if self.stream_images: ## added fo separate streams
-                        del self.incoming_det[i] ## added fo separate streams
+        logger.info('indices = ' % indices)
+        self.socket.send_json(['load', {'frame': indices}])
+        dct = self.socket.recv_json()
 
-            # take data for this node
-            dct = {i: self.incoming[i] for i in indices}
-            if self.stream_images:
-                # merge streamed images
-                for i in indices:
-                    dct[i][self.info.detector] = self.incoming_det[i]
-            for i in indices:
-                del self.incoming[i]
-                if self.stream_images:
-                    del self.incoming_det[i]
-        else:
-            # receive data from the master node
-            parallel.send(indices, dest=0)
-            dct = parallel.receive(source=0)
-        #logger_info(dct)
 
         # repackage data and return
         for i in indices:
             try:
-                ## raw[i] = dct[i]['diff'] ## used for single stream
-#                ToDo
-#                      - implement this
-                raw[i] = dct[i][self.info.detector]
-                #            pos[i] = np.array([
-                #                        dct[i][self.info.xMotor],
-                #                        dct[i][self.info.yMotor],
-                #                        ]) * 1e-6
-                x = dct[i][self.info.xMotor]
-                y = dct[i][self.info.yMotor]
-                ## x = dct[i]['x'] ## used for single stream
-                ## y = dct[i]['y'] ## used for single stream
-                pos[i] = np.array((x, y)) 
-                ## pos[i] = -np.array((y, -x)) * 1e-6 ## used for single stream
-                logger_info(pos[i])
-                weight[i] = np.ones_like(raw[i])
-                weight[i][np.where(raw[i] == 2 ** 32 - 1)] = 0
-
-                # d = msg['iterable'][0]
-                # dct = {'x': d['position'][0],
-                #        'y': d['position'][1],
-                #        'diff': d['data']}
-                logger.info('######## Repackaged data from frame nr. : %d' % i)
+                raw[i] = dct['img'][i]
+                x = dct['pos'][i]['xMotor']
+                y = dct['pos'][i]['yMotor']
+                pos[i] = -np.array((y, -x)) * 1e-6
             except:
                 break
+
+        # ToDo: Fix mask and weights
+
+        if self.end_of_scan == True:
+            self.socket.close()
+
         t1 = time.perf_counter()
         self.loadtottime += t1 - t0
         logger.info('#### Time spent in load = %f, accumulated time = %f' % ((t1 - t0), self.loadtottime))
@@ -449,5 +325,3 @@ class LiveScan(PtyScan):
 
         return raw, pos, weight
 
-    def get_LS_data(self):
-        return self.loadtottime
