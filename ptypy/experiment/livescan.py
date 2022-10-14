@@ -106,6 +106,7 @@ from ptypy import defaults_tree
 from ptypy.experiment import register
 from ptypy.utils.verbose import headerline
 import inspect
+from bitshuffle import decompress_lz4
 
 logger = u.verbose.logger
 def logger_info(*arg):
@@ -271,15 +272,21 @@ class LiveScan(PtyScan):
 
         if self.latest_frame_index_received < self.info.min_frames * parallel.size:
             logger.info('have %u frames, waiting...' % (self.latest_frame_index_received + 1))
-            time.sleep(0.5)
+            time.sleep(0.8)
             self.check(frames=frames, start=start)
+
+        if self.end_of_scan == True and (self.latest_frame_index_received - start + 1) == 0:
+            self.socket.send_json(['stop'])
+            reply = self.socket.recv_json()
+            logger.info('Closing the relay_socket at %s' % time.strftime("%H:%M:%S", time.localtime()))
+            self.socket.close()
 
         logger.info('#### check return (self.latest_frame_index_received - start + 1), self.end_of_scan  =  (%d - %d + 1), %s' % (self.latest_frame_index_received, start, self.end_of_scan))
         t1 = time.perf_counter()
         self.checktottime += t1-t0
         logger.info('#### Time spent in check = %f, accumulated time = %f' % ((t1-t0), self.checktottime))
         logger.info(headerline('', 'c', '#'))
-        logger.info(headerline('Leaving LiveScan().check()', 'c', '#'))
+        logger.info(headerline('Leaving LiveScan().check() at time %s' % time.strftime("%H:%M:%S", time.localtime()), 'c', '#'))
         logger.info(headerline('', 'c', '#') + '\n')
         return (self.latest_frame_index_received - start + 1), self.end_of_scan
 
@@ -290,37 +297,56 @@ class LiveScan(PtyScan):
         which node contains which data."""
         raw, weight, pos = {}, {}, {}
         logger.info(headerline('', 'c', '#'))
-        logger.info(headerline('Entering LiveScan().load()', 'c', '#'))
+        logger.info(headerline('Entering LiveScan().load() at time %s' % time.strftime("%H:%M:%S", time.localtime()), 'c', '#'))
         logger.info(headerline('', 'c', '#'))
         t0 = time.perf_counter()
         self.loadnr += 1
         logger.info('load() has now been called %d times.' % self.loadnr)
+        logger.info('### parallel.master = %s, parallel.size = %s' % (str(parallel.master), str(parallel.size)))  ### DEBUG
 
-        logger.info('indices = ' % indices)
+        logger.info('### indices = %s' % indices)  ### DEBUG
         self.socket.send_json(['load', {'frame': indices}])
-        dct = self.socket.recv_json()
-
+        msgs = self.socket.recv_pyobj()
+        logger.info('### msgs[0][shape] = %s' % str(msgs[0]['shape'])) ### DEBUG
+        buff = self.socket.recv(copy=True)
+        imgs = decompress_lz4(np.frombuffer(buff, dtype=np.dtype('uint8')), msgs[0]['shape'], msgs[0]['dtype'])
+        logger.info('### type(imgs) = %s' % type(imgs)) ### DEBUG
 
         # repackage data and return
-        for i in indices:
+        for k, i in enumerate(indices):
             try:
-                raw[i] = dct['img'][i]
-                x = dct['pos'][i]['xMotor']
-                y = dct['pos'][i]['yMotor']
+                raw[i] = imgs[k]
+                logger.info('### i = %s, raw[i].shape = %s' % (str(i), str(raw[i].shape))) ### DEBUG
+
+                xMotorKeys = self.info.xMotor.split('/')
+                yMotorKeys = self.info.yMotor.split('/')
+                x = y = msgs[k]
+                for xkey in xMotorKeys:
+                    x = x[xkey]
+                for ykey in yMotorKeys:
+                    y = y[ykey]
+
+                logger.info('### x, y = %s, %s' % (str(x), str(y))) ### DEBUG
                 pos[i] = -np.array((y, -x)) * 1e-6
-            except:
+                pos[i] = pos[i].reshape(len(pos[i]))
+                logger.info('### pos[i] = %s, pos[i].shape = %s' % (str(pos[i]), str(pos[i].shape))) ### DEBUG
+                weight[i] = np.ones_like(raw[i])
+                weight[i][np.where(raw[i] == 2 ** 32 - 1)] = 0
+                logger.info('### weight[i].shape = %s' % str(weight[i].shape)) ### DEBUG
+            except Exception as err:
+                logger.info('### load exception')  ### DEBUG
+                print('Error: ', err)
                 break
 
         # ToDo: Fix mask and weights
 
-        if self.end_of_scan == True:
-            self.socket.close()
 
+        logger.info('### pos = %s' % str(pos))  ### DEBUG
         t1 = time.perf_counter()
         self.loadtottime += t1 - t0
         logger.info('#### Time spent in load = %f, accumulated time = %f' % ((t1 - t0), self.loadtottime))
         logger.info(headerline('', 'c', '#'))
-        logger.info(headerline('Leaving LiveScan().load()', 'c', '#'))
+        logger.info(headerline('Leaving LiveScan().load() at time %s' % time.strftime("%H:%M:%S", time.localtime()), 'c', '#'))
         logger.info(headerline('', 'c', '#') + '\n')
 
         return raw, pos, weight
