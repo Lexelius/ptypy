@@ -107,6 +107,9 @@ from ptypy.experiment import register
 from ptypy.utils.verbose import headerline
 import inspect
 from bitshuffle import decompress_lz4
+import re
+from mpi4py import MPI ###
+import pdb
 
 logger = u.verbose.logger
 def logger_info(*arg):
@@ -130,7 +133,7 @@ def decompress(data, shape, dtype):
     return output
 
 
-def backtrace(fname=None):
+def backtrace(fname=None, extra={}):
     """
     Retrieves variables from functions/classes which are calling LiveScan,
     such that current nr of pods and the nr of currently performed iterations
@@ -146,7 +149,7 @@ def backtrace(fname=None):
     ####         print(f'calframe[{fr}][0].f_locals.keys() = \n', calframe[fr][0].f_locals.keys(), '\n')
     #### except:
     ####     pass
-    #print(*[(frame.lineno, frame.filename) for frame in calframe], sep="\n")
+    #print(*[(frame.lineno, frame.filename, frame.function) for frame in calframe], sep="\n")
     try:
         ##OnMyMac## ptychoframe = [frame.filename for frame in calframe].index('/opt/anaconda3/envs/Contrast_PtyPyLive_v1/lib/python3.7/site-packages/ptypy/core/ptycho.py') ## or '/opt/anaconda3/envs/ptypy_contrast_NM-utils/lib/python3.7/site-packages/ptypy/core/ptycho.py'   or  '/opt/anaconda3/envs/Contrast_PtyPyLive_v1/lib/python3.7/site-packages/ptypy/core/ptycho.py'   or  '/Users/lexelius/Documents/PtyPy/ptypy-master/ptypy/core/ptycho.py'
         ptychoframe = [frame.filename for frame in calframe].index(ptypy.core.ptycho.__file__)
@@ -155,6 +158,8 @@ def backtrace(fname=None):
         active_pods = sum(1 for pod in ptycho_self.pods.values() if pod.active)
         all_pods = len(ptycho_self.pods.values())
         print(f'---- Total Pods {all_pods} ({active_pods} active) ----')
+        # if calframe[ptychoframe].function == 'run': ###
+        #     pdb.set_trace()
     except:
         pass
     if calframe[7].function == 'run':# and calframe[7].lineno == 632:
@@ -162,6 +167,8 @@ def backtrace(fname=None):
         print('ptycho_engine.curiter = ', ptycho_engine.curiter)
     if fname != None:
         with open(fname, 'a') as f:
+            if extra != {}:
+                f.write(f'{extra}, \n')
             f.write(f'Total Pods: {all_pods} ({active_pods} active), \n')
             try:
                 f.write(f'Iteration:  {ptycho_engine.curiter}, \n\n')
@@ -214,6 +221,11 @@ class LiveScan(PtyScan):
     default = 'diff'
     type = str
     help = Which detector from the contrast stream to use
+
+    [block_wait_count]
+    default = 0
+    type = int
+    help = Signals a WAIT to the model after this many blocks.
     """
 
 
@@ -236,6 +248,7 @@ class LiveScan(PtyScan):
         self.end_of_scan = False
         self.latest_frame_index_received = -1
         self.checknr = 0
+        self.checknr_external = 0
         self.loadnr = 0
         self.checktottime = 0
         self.loadtottime = 0
@@ -244,6 +257,9 @@ class LiveScan(PtyScan):
         #backtrace()
 
         self.p = p
+
+        self.BT_fname = re.sub(r'(.*/).*/.*', rf'\1backtrace_{time.strftime("%F_%H:%M:%S", time.localtime())}.txt', self.p.dfile)
+
         logger.info(headerline('', 'c', '#'))
         logger.info(headerline('Leaving LiveScan().init()', 'c', '#'))
         logger.info(headerline('', 'c', '#') + '\n')
@@ -252,36 +268,90 @@ class LiveScan(PtyScan):
     def check(self, frames=None, start=None):
         """
         Only called on the master node.
+
+        Parameters
+        ----------
+        frames : int or None
+            Number of frames requested.
+        start : int or None
+            Scanpoint index to start checking from.
+
+        Returns
+        -------
+        frames_accessible : int
+            Number of frames readable.
+
+        end_of_scan : int or None
+            is one of the following,
+            - 0, end of the scan is not reached
+            - 1, end of scan will be reached or is
+            - None, can't say
         """
         logger.info(headerline('', 'c', '#'))
         logger.info(headerline('Entering LiveScan().check()', 'c', '#'))
         logger.info(headerline('', 'c', '#'))
         t0 = time.perf_counter()
         self.checknr += 1
-        logger.info('check() has now been called %d times.' % self.checknr)  ##
+        self.checknr_external += 1
+        logger.info('check() has now been called %d times in total, and %d times externally.' % (self.checknr, self.checknr_external))  ##
+        ###backtrace(self.BT_fname, extra={'checknr': self.checknr, 'checknr_external': self.checknr_external, 'latest_frame_index_received': self.latest_frame_index_received, 'frames': frames, 'start': start})
 
-        self.socket.send_json(['check'])
-        msg = self.socket.recv_json()
-        if isinstance(msg, dict):
-            self.meta.energy = np.float64([msg['energy']]) * 1e-3  ## Read energy from beamline snapshot
-        else:
-            logger.info('#### check message = %s' % msg)
-            frames_accessible_tot = msg[0]
-            self.latest_frame_index_received = frames_accessible_tot - 1 # could also set this to =msg[0] and delete the "+1" in the return..
-            self.end_of_scan = msg[1]
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank()
+        logger.info("### I'm check-rank nr  = %s" % rank)
 
-        if self.latest_frame_index_received < self.info.min_frames * parallel.size:
-            logger.info('have %u frames, waiting...' % (self.latest_frame_index_received + 1))
-            time.sleep(0.8)
-            self.check(frames=frames, start=start)
+        bwc = self.p.block_wait_count
+        if bwc >= 1 and self.checknr_external % (bwc + 1) == 0:  ## ToDo: Make a better solution than using self.checknr
+            backtrace(self.BT_fname, extra={'checknr': self.checknr, 'checknr_external': self.checknr_external,
+                                            'return': ['bwc => 0', self.end_of_scan], 'p.num_frames': self.p.num_frames, 'frames': frames, 'start': start})
+            logger.info('### backtrace, return')
+            return 0, self.end_of_scan
 
-        if self.end_of_scan == True and (self.latest_frame_index_received - start + 1) == 0:
-            self.socket.send_json(['stop'])
-            reply = self.socket.recv_json()
-            logger.info('Closing the relay_socket at %s' % time.strftime("%H:%M:%S", time.localtime()))
-            self.socket.close()
+        logger.info('waiting for reply from RelayServer..')
+        while True:
+            self.socket.send_json(['check'])
+            msg = self.socket.recv_json()
+            if isinstance(msg, dict):
+                self.meta.energy = np.float64([msg['energy']]) * 1e-3  ## Read energy from beamline snapshot
+            else:
+                logger.info('#### check message = %s' % msg)
+                frames_accessible_tot = msg[0]
+                self.latest_frame_index_received = frames_accessible_tot - 1 # could also set this to =msg[0] and delete the "+1" in the return..
+                self.end_of_scan = msg[1]
 
-        logger.info('#### check return (self.latest_frame_index_received - start + 1), self.end_of_scan  =  (%d - %d + 1), %s' % (self.latest_frame_index_received, start, self.end_of_scan))
+            backtrace(self.BT_fname,
+                      extra={'checknr': self.checknr, 'checknr_external': self.checknr_external,
+                             'return': [(self.latest_frame_index_received - start + 1), self.end_of_scan],
+                             'latest_frame_index_received': self.latest_frame_index_received, 'p.num_frames': self.p.num_frames,
+                             'frames': frames, 'start': start})
+
+            if self.latest_frame_index_received < self.info.min_frames * parallel.size:
+                logger.info('have %u frames, waiting...' % (self.latest_frame_index_received + 1))
+                time.sleep(0.8)
+                # self.checknr_external -= 1
+                # self.check(frames=frames, start=start)
+            ### DEBUG: GPU memory error. Fixed nr of loaded frames each time.
+            elif self.latest_frame_index_received - start + 1 >= 1:
+                self.latest_frame_index_received = start
+                break
+
+            # backtrace(self.BT_fname,
+            #           extra={'checknr': self.checknr, 'checknr_external': self.checknr_external, 'return': [(self.latest_frame_index_received - start + 1), self.end_of_scan], 'latest_frame_index_received': self.latest_frame_index_received, 'p.num_frames': self.p.num_frames,
+            #                  'frames': frames, 'start': start})
+
+            if self.end_of_scan == True and (self.latest_frame_index_received - start + 1) == 0:
+                self.socket.send_json(['stop'])
+                reply = self.socket.recv_json()
+                logger.info('Closing the relay_socket at %s' % time.strftime("%H:%M:%S", time.localtime()))
+                self.socket.close()
+                break
+
+        #
+        # if self.checknr_external >= 5 and (self.latest_frame_index_received - start + 1) <= 2:
+        #     return 0, self.end_of_scan
+
+
+        logger.info('#### check return [(self.latest_frame_index_received - start + 1), self.end_of_scan]  =  [(%d - %d + 1), %s] = [%d, %s]' % (self.latest_frame_index_received, start, self.end_of_scan, (self.latest_frame_index_received-start+1), self.end_of_scan))
         t1 = time.perf_counter()
         self.checktottime += t1-t0
         logger.info('#### Time spent in check = %f, accumulated time = %f' % ((t1-t0), self.checktottime))
@@ -302,7 +372,12 @@ class LiveScan(PtyScan):
         t0 = time.perf_counter()
         self.loadnr += 1
         logger.info('load() has now been called %d times.' % self.loadnr)
+        backtrace()
         logger.info('### parallel.master = %s, parallel.size = %s' % (str(parallel.master), str(parallel.size)))  ### DEBUG
+
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank()
+        logger.info("### I'm load-rank nr  = %s" % rank)
 
         logger.info('### indices = %s' % indices)  ### DEBUG
         self.socket.send_json(['load', {'frame': indices}])
