@@ -11,7 +11,10 @@ from ptypy.core import Ptycho
 from ptypy import utils as u
 from distutils.version import LooseVersion
 from mpi4py import MPI
-setting='gpu'
+import matplotlib
+import matplotlib.pyplot as plt
+matplotlib.use('TkAgg')
+setting='cpu'
 if ptypy.version[:3] == '0.5':
 	ptypy.load_ptyscan_module("livescan")
 	if setting != 'cpu':
@@ -96,10 +99,14 @@ p.run = 'scan%d' % scannr
 p.io = u.Param()
 p.io.home = out_dir_rec                     # where to save the final reconstructions
 p.io.rfile = path_rec                       # how to name those files for the final reconstructions
+p.io.interaction = u.Param()
+p.io.interaction.active = True
 p.io.autosave = u.Param()
 p.io.autosave.rfile = path_dumps            # where to save the intermediate reconstructions and how to name them
 p.io.autoplot = u.Param()
-p.io.autoplot.active = False
+p.io.autoplot.active = True
+
+
 
 # Scan parameters
 p.scans = u.Param()
@@ -128,8 +135,8 @@ p.scans.scan00.data.dfile = path_data		# once all data is collected, save it as 
 p.scans.scan00.data.center = (1340, 646)     # center of the diffraction pattern (y,x) in pixel or None -> auto
 ##### p.scans.scan00.data.cropOnLoad = True       # only load used part of detector frames -> save memory
                                             # requires center to be set explicitly
-##### !!!!!! p.scans.scan00.data.xMotorFlipped = True
-##### p.scans.scan00.data.yMotorFlipped = False
+p.scans.scan00.data.xMotorFlipped = True
+p.scans.scan00.data.yMotorFlipped = False
 p.scans.scan00.data.orientation = {'merlin': (False, False, True),
                                    'pilatus': None,
                                     'eiger': (False, True, False)}[detector]
@@ -139,7 +146,7 @@ p.scans.scan00.data.psize = {'pilatus': 172e-6,
                               'eiger': 75e-6}[detector]
 #p.scans.scan00.data.energy = energy_keV    # incident photon energy in [keV], now read from file
 ##### p.scans.scan00.data.I0 = None               # can be like 'alba2/1'
-##p.scans.scan00.data.min_frames = 1		## Minimum number of frames loaded by each node
+p.scans.scan00.data.min_frames = 1		## Minimum number of frames loaded by each node
 p.scans.scan00.data.load_parallel = 'all'
 
 # scan parameters: illumination
@@ -173,7 +180,7 @@ if setting == 'cpu':
 	p.engines.engine00.name = 'DM'
 else:
 	p.engines.engine00.name = 'DM_pycuda'#'DM'
-p.engines.engine00.numiter = 30#100                    # number of iterations
+p.engines.engine00.numiter = 50                    # number of iterations
 p.engines.engine00.numiter_contiguous = 1##50          # Number of iterations without interruption
 
 p.engines.engine00.probe_support = 3                # non-zero probe area as fraction of the probe frame
