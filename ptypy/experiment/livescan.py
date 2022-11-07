@@ -217,6 +217,18 @@ class LiveScan(PtyScan):
     help = Which y motor to use
     doc =
 
+    [xMotorFlipped]
+    default = False
+    type = bool
+    help = Flip detector x positions
+    doc =
+
+    [yMotorFlipped]
+    default = False
+    type = bool
+    help = Flip detector y positions
+    doc =
+
     [detector]
     default = 'diff'
     type = str
@@ -300,24 +312,38 @@ class LiveScan(PtyScan):
         rank = comm.Get_rank()
         logger.info("### I'm check-rank nr  = %s" % rank)
 
+        if self.end_of_scan == True and (self.latest_frame_index_received - start + 1) == 0:
+            self.socket.send_json(['stop'])
+            reply = self.socket.recv_json()
+            logger.info('Closing the relay_socket at %s' % time.strftime("%H:%M:%S", time.localtime()))
+            self.socket.close()
+            return 0, self.end_of_scan
+
         bwc = self.p.block_wait_count
         if bwc >= 1 and self.checknr_external % (bwc + 1) == 0:  ## ToDo: Make a better solution than using self.checknr
             backtrace(self.BT_fname, extra={'checknr': self.checknr, 'checknr_external': self.checknr_external,
                                             'return': ['bwc => 0', self.end_of_scan], 'p.num_frames': self.p.num_frames, 'frames': frames, 'start': start})
-            logger.info('### backtrace, return')
+            logger.info('### block_wait_count, return')
             return 0, self.end_of_scan
 
         logger.info('waiting for reply from RelayServer..')
         while True:
+            self.socket.send_json(['check_energy'])
+            msg = self.socket.recv_json()
+            if msg['energy'] != False:
+                self.meta.energy = np.float64([msg['energy']]) * 1e-3  ## Read energy from beamline snapshot
+                break
+            time.sleep(1)
+        while True:
             self.socket.send_json(['check'])
             msg = self.socket.recv_json()
-            if isinstance(msg, dict):
-                self.meta.energy = np.float64([msg['energy']]) * 1e-3  ## Read energy from beamline snapshot
-            else:
-                logger.info('#### check message = %s' % msg)
-                frames_accessible_tot = msg[0]
-                self.latest_frame_index_received = frames_accessible_tot - 1 # could also set this to =msg[0] and delete the "+1" in the return..
-                self.end_of_scan = msg[1]
+            # if isinstance(msg, dict):
+            #     self.meta.energy = np.float64([msg['energy']]) * 1e-3  ## Read energy from beamline snapshot
+            # else:
+            logger.info('#### check message = %s' % msg)
+            frames_accessible_tot = msg[0]
+            self.latest_frame_index_received = frames_accessible_tot - 1 # could also set this to =msg[0] and delete the "+1" in the return..
+            self.end_of_scan = msg[1]
 
             backtrace(self.BT_fname,
                       extra={'checknr': self.checknr, 'checknr_external': self.checknr_external,
@@ -325,26 +351,28 @@ class LiveScan(PtyScan):
                              'latest_frame_index_received': self.latest_frame_index_received, 'p.num_frames': self.p.num_frames,
                              'frames': frames, 'start': start})
 
-            if self.latest_frame_index_received < self.info.min_frames * parallel.size:
+            if self.latest_frame_index_received < self.info.min_frames * parallel.size or self.latest_frame_index_received < 54:
                 logger.info('have %u frames, waiting...' % (self.latest_frame_index_received + 1))
-                time.sleep(0.8)
+                time.sleep(1)
                 # self.checknr_external -= 1
                 # self.check(frames=frames, start=start)
-            ### DEBUG: GPU memory error. Fixed nr of loaded frames each time.
-            elif self.latest_frame_index_received - start + 1 >= 1:
-                self.latest_frame_index_received = start
+            # ### DEBUG: GPU memory error. Fixed nr of loaded frames each time.
+            # elif self.latest_frame_index_received - start + 1 >= 1:
+            #     self.latest_frame_index_received = start
+            #     break
+            else:
                 break
 
             # backtrace(self.BT_fname,
             #           extra={'checknr': self.checknr, 'checknr_external': self.checknr_external, 'return': [(self.latest_frame_index_received - start + 1), self.end_of_scan], 'latest_frame_index_received': self.latest_frame_index_received, 'p.num_frames': self.p.num_frames,
             #                  'frames': frames, 'start': start})
 
-            if self.end_of_scan == True and (self.latest_frame_index_received - start + 1) == 0:
-                self.socket.send_json(['stop'])
-                reply = self.socket.recv_json()
-                logger.info('Closing the relay_socket at %s' % time.strftime("%H:%M:%S", time.localtime()))
-                self.socket.close()
-                break
+            # if self.end_of_scan == True and (self.latest_frame_index_received - start + 1) == 0:
+            #     self.socket.send_json(['stop'])
+            #     reply = self.socket.recv_json()
+            #     logger.info('Closing the relay_socket at %s' % time.strftime("%H:%M:%S", time.localtime()))
+            #     self.socket.close()
+            #     break
 
         #
         # if self.checknr_external >= 5 and (self.latest_frame_index_received - start + 1) <= 2:
@@ -365,6 +393,8 @@ class LiveScan(PtyScan):
         """indices are generated by PtyScan's _mpi_indices method.
         It is a diffraction data index lists that determine
         which node contains which data."""
+        ### ToDo: add feature for asking about IO data, and normalize with raw[i] = io[i] / np.mean(io[:i+1])
+        ### ToDo: See if I can update the values of diffraction patterns after they have been loaded (to get a more accurate IO normalization)
         raw, weight, pos = {}, {}, {}
         logger.info(headerline('', 'c', '#'))
         logger.info(headerline('Entering LiveScan().load() at time %s' % time.strftime("%H:%M:%S", time.localtime()), 'c', '#'))
@@ -391,6 +421,7 @@ class LiveScan(PtyScan):
         for k, i in enumerate(indices):
             try:
                 raw[i] = imgs[k]
+
                 logger.info('### i = %s, raw[i].shape = %s' % (str(i), str(raw[i].shape))) ### DEBUG
 
                 xMotorKeys = self.info.xMotor.split('/')
@@ -401,8 +432,15 @@ class LiveScan(PtyScan):
                 for ykey in yMotorKeys:
                     y = y[ykey]
 
+                if self.info.xMotorFlipped:
+                    x *= -1
+                if self.info.yMotorFlipped:
+                    y *= -1
+
+                #x -= -0.97360795646091
+                #y -= 0.360680311918259 ## hardcoded test for scan 000040
                 logger.info('### x, y = %s, %s' % (str(x), str(y))) ### DEBUG
-                pos[i] = -np.array((y, -x)) * 1e-6
+                pos[i] = -np.array((y, x)) * 1e-6
                 pos[i] = pos[i].reshape(len(pos[i]))
                 logger.info('### pos[i] = %s, pos[i].shape = %s' % (str(pos[i]), str(pos[i].shape))) ### DEBUG
                 weight[i] = np.ones_like(raw[i])
