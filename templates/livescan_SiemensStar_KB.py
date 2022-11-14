@@ -119,7 +119,7 @@ p.scans.scan00.coherence.num_object_modes = 1		# number of object modes
 
 p.scans.scan00.data = u.Param()
 p.scans.scan00.data.name = 'LiveScan'
-p.scans.scan00.data.block_wait_count = 0
+p.scans.scan00.data.block_wait_count = 1
 ##### p.scans.scan00.data.path = beamtime_basedir+sample+'/'
 p.scans.scan00.data.detector = detector
 ##### p.scans.scan00.data.maskfile = {'merlin': '/data/visitors/nanomax/common/masks/merlin/latest.h5', 'pilatus': None, 'eiger': None,}[detector]
@@ -135,7 +135,7 @@ p.scans.scan00.data.dfile = path_data		# once all data is collected, save it as 
 p.scans.scan00.data.center = (1340, 646)     # center of the diffraction pattern (y,x) in pixel or None -> auto
 ##### p.scans.scan00.data.cropOnLoad = True       # only load used part of detector frames -> save memory
                                             # requires center to be set explicitly
-p.scans.scan00.data.xMotorFlipped = True
+p.scans.scan00.data.xMotorFlipped = False
 p.scans.scan00.data.yMotorFlipped = False
 p.scans.scan00.data.orientation = {'merlin': (False, False, True),
                                    'pilatus': None,
@@ -146,7 +146,9 @@ p.scans.scan00.data.psize = {'pilatus': 172e-6,
                               'eiger': 75e-6}[detector]
 #p.scans.scan00.data.energy = energy_keV    # incident photon energy in [keV], now read from file
 ##### p.scans.scan00.data.I0 = None               # can be like 'alba2/1'
-p.scans.scan00.data.min_frames = 1		## Minimum number of frames loaded by each node
+p.scans.scan00.data.min_frames = 1		## Minimum number of frames loaded by each node/process
+p.scans.scan00.data.start_frame = 15		## Minimum number of frames loaded before starting iterations
+p.scans.scan00.data.frames_per_iter = None  # None ## Load a fixed number of frames in between each iteration, default = None
 p.scans.scan00.data.load_parallel = 'all'
 
 # scan parameters: illumination
