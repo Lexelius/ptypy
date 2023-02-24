@@ -506,7 +506,7 @@ class LiveScan(PtyScan):
                 self.info.shape = u.expect2(self.info.shape) // self.info.rebin
                 if self.info.psize is not None:
                     self.meta.psize = u.expect2(self.info.psize) * self.info.rebin
-                self.info.rebin = 1
+                self.rebin = 1
             else:
                 # Setting this to False to get correct info when writing to .ptyd
                 self.info.rebin_at_RS = False
