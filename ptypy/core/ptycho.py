@@ -5,7 +5,7 @@ ptycho - definition of the upper-level class Ptycho.
 This file is part of the PTYPY package.
 
     :copyright: Copyright 2014 by the PTYPY team, see AUTHORS.
-    :license: GPLv2, see LICENSE for details.
+    :license: see LICENSE for details.
 """
 import numpy as np
 import time
@@ -350,6 +350,7 @@ class Ptycho(Base):
         self.interactor = None
         self.plotter = None
         self.record_positions = False
+        self._jupyter_client = None
 
         # Early boot strapping
         self._configure()
@@ -700,9 +701,19 @@ class Ptycho(Base):
                                 'Time %(duration).3f' % info)
                     logger.info('Errors :: Fourier %.2e, Photons %.2e, '
                                 'Exit %.2e' % tuple(err))
-                    ilog_streamer('%(engine)s: Iteration # %(iteration)d/%(numiter)d :: ' %info + 
-                                   'Fourier %.2e, Photons %.2e, Exit %.2e' %tuple(err))
-
+                    imsg = '%(engine)s: Iteration # %(iteration)d/%(numiter)d :: ' %info + \
+                                   'Fourier %.2e, Photons %.2e, Exit %.2e' %tuple(err)
+                    if not self.p.io.autoplot.threaded:
+                        if not (info["iteration"] % self.p.io.autoplot.interval):
+                            if self._jupyter_client is None:
+                                from IPython import display
+                                from ptypy.utils.plot_client import _JupyterClient
+                                self._jupyter_client = _JupyterClient(self, autoplot_pars=self.p.io.autoplot, layout_pars=self.p.io.autoplot.layout)
+                            self._jupyter_client.runtime.update(self.runtime)
+                            display.display(self._jupyter_client.plot(title=imsg), clear=True)
+                    else:
+                        ilog_streamer(imsg)
+                    
                 parallel.barrier()
 
             ilog_newline()
