@@ -2,7 +2,8 @@
 Current state: In progress, not checked to work yet.
                 Connects to directly to streamer
 
-
+After running the reconstruction script, variables of the LiveScan class can be found under
+    P.model.scans['scan00'].ptyscan.__dict__
 
 Old notes:
 ----------------------------------------------------------------------------
@@ -133,7 +134,7 @@ def decompress(data, shape, dtype):
     return output
 
 
-def backtrace(fname=None, extra={}):
+def backtrace(fname=None, plotlog=None, request_Ptycho=None, extra={}):
     """
     Retrieves variables from functions/classes which are calling LiveScan,
     such that current nr of pods and the nr of currently performed iterations
@@ -174,6 +175,18 @@ def backtrace(fname=None, extra={}):
                 f.write(f'Iteration:  {ptycho_engine.curiter}, \n\n')
             except:
                 pass
+    if plotlog != None:
+        addr = ptycho_self.interactor.address
+        port = ptycho_self.interactor.port
+        print(f'Connected to :::::: {addr}:{port}')
+    if request_Ptycho != None:
+        print('++++++++++++++++ ptycho_self ++++++++++++++++')
+        for key, val in ptycho_self.__dict__.items():
+            print(key, ':', val)
+        print()
+        print(ptycho_self.interactor)
+        print('+++++++++++++++++++++++++++++++++++++++++++++')
+
     logger.info(headerline('', 'c', '°') + '\n')
 
 
@@ -248,6 +261,16 @@ class LiveScan(PtyScan):
     default = None
     type = int
     help = Load a fixed number of frames in between each iteration
+
+    [crop_at_RS]
+    default = True
+    type = bool
+    help = Crop at the RelayServer instead of in PtyPy
+
+    [rebin_at_RS]
+    default = True
+    type = bool
+    help = Rebin at the RelayServer instead of in PtyPy
     """
 
 
@@ -269,19 +292,32 @@ class LiveScan(PtyScan):
 
         self.end_of_scan = False
         self.energy_replied = False
+        self.interaction_started = False
         self.latest_frame_index_received = -1
         self.checknr = 0
         self.checknr_external = 0
         self.loadnr = 0
         self.checktottime = 0
         self.loadtottime = 0
+        self.preprocess_RS = {}
         self.t = time.gmtime()
         self.t = f'{self.t[0]}-{self.t[1]:02d}-{self.t[2]:02d}__{self.t[3]:02d}-{self.t[4]:02d}'
         #backtrace()
 
         self.p = p
+        # !#
+        if self.info.crop_at_RS:
+            self.preprocess_RS['shape'] = self.p.shape
+            self.preprocess_RS['center'] = self.p.center
+        if self.info.rebin_at_RS and self.p.rebin is not None and (self.p.rebin != 1):
+            self.preprocess_RS['rebin'] = self.p.rebin
+        ## Implement background subtraction
+        self.socket.send_json(['preprocess', self.preprocess_RS])
+        self.socket.recv_json()
+        # !#
 
         self.BT_fname = re.sub(r'(.*/).*/.*', rf'\1backtrace_{time.strftime("%F_%H:%M:%S", time.localtime())}.txt', self.p.dfile)
+        self.BT_logfname = '/data/staff/nanomax/commissioning_2022-2/reblex/interaction_log.txt'##'/mxn/home/reblex/interaction_log.txt' # Will have to be updated on official release.
 
         logger.info(headerline('', 'c', '#'))
         logger.info(headerline('Leaving LiveScan().init()', 'c', '#'))
@@ -322,6 +358,8 @@ class LiveScan(PtyScan):
         comm = MPI.COMM_WORLD
         rank = comm.Get_rank()
         logger.info("### I'm check-rank nr  = %s" % rank)
+        if not self.interaction_started:
+            self.BackTrace2(plotlog=self.BT_logfname)
 
         if self.end_of_scan == True and (self.latest_frame_index_received - start + 1) == 0:
             self.socket.send_json(['stop'])
@@ -329,12 +367,13 @@ class LiveScan(PtyScan):
             logger.info('Closing the relay_socket at %s' % time.strftime("%H:%M:%S", time.localtime()))
             self.socket.close()
             return 0, self.end_of_scan
-
-        bwc = self.p.block_wait_count
+        #!# else do this bwc:
+        bwc = self.p.block_wait_count #### maybe
         if bwc >= 1 and self.checknr_external % (bwc + 1) == 0:  ## ToDo: Make a better solution than using self.checknr
             ##### backtrace(self.BT_fname, extra={'checknr': self.checknr, 'checknr_external': self.checknr_external, 'return': ['bwc => 0', self.end_of_scan], 'p.num_frames': self.p.num_frames, 'frames': frames, 'start': start})
             logger.info('### block_wait_count, return')
             return 0, False#####self.end_of_scan
+
 
         logger.info('waiting for reply from RelayServer..')
         while not self.energy_replied:
@@ -430,7 +469,8 @@ class LiveScan(PtyScan):
         logger.info(headerline('', 'c', '#'))
         logger.info(headerline('Leaving LiveScan().check() at time %s' % time.strftime("%H:%M:%S", time.localtime()), 'c', '#'))
         logger.info(headerline('', 'c', '#') + '\n')
-        return (self.frames_accessible - start), self.end_of_scan
+        #!#return (self.frames_accessible - start), self.end_of_scan
+        return (self.frames_accessible), self.end_of_scan
 
 
     def load(self, indices):
@@ -456,6 +496,26 @@ class LiveScan(PtyScan):
         buff = self.socket.recv(copy=True)
         imgs = decompress_lz4(np.frombuffer(buff, dtype=np.dtype('uint8')), msgs[0]['shape'], msgs[0]['dtype'])
         logger.info('### type(imgs) = %s' % type(imgs)) ### DEBUG
+        if self.loadnr == 1 and 'new_center' in msgs[0].keys():
+            self.info.center = msgs[0]['new_center']
+        if self.loadnr == 1 and 'RS_rebinned' in msgs[0].keys():
+            if msgs[0]['RS_rebinned']:
+                # Maybe not the best solution to let rebin_at_RS be of type bool,
+                # since the only way of seeing the rebinning factor used in RS is
+                # to compare the shapes in meta and info of the .ptyd file..
+                self.info.shape = u.expect2(self.info.shape) // self.info.rebin
+                if self.info.psize is not None:
+                    self.meta.psize = u.expect2(self.info.psize) * self.info.rebin
+                self.info.rebin = 1
+            else:
+                # Setting this to False to get correct info when writing to .ptyd
+                self.info.rebin_at_RS = False
+
+        if self.info.rebin_at_RS:
+            # Then imgs contain both diff and weights.
+            w = imgs[1]
+            imgs = imgs[0]
+            print(f'w.shape = {w.shape}, imgs.shape = {imgs.shape}')### DEBUG
 
         # repackage data and return
         for k, i in enumerate(indices):
@@ -481,8 +541,11 @@ class LiveScan(PtyScan):
                 pos[i] = -np.array((y, x)) * 1e-6
                 pos[i] = pos[i].reshape(len(pos[i]))
                 logger.info('### pos[i] = %s, pos[i].shape = %s' % (str(pos[i]), str(pos[i].shape))) ### DEBUG
-                weight[i] = np.ones_like(raw[i])
-                weight[i][np.where(raw[i] == 2 ** 32 - 1)] = 0
+                if self.info.rebin_at_RS:
+                    weight[i] = w[k]
+                else:
+                    weight[i] = np.ones_like(raw[i])
+                    weight[i][np.where(raw[i] == 2 ** 32 - 1)] = 0
                 logger.info('### weight[i].shape = %s' % str(weight[i].shape)) ### DEBUG
             except Exception as err:
                 logger.info('### load exception')  ### DEBUG
@@ -501,4 +564,62 @@ class LiveScan(PtyScan):
         logger.info(headerline('', 'c', '#') + '\n')
 
         return raw, pos, weight
+
+
+    def BackTrace2(self, fname=None, plotlog=None, extra={}):
+        """
+        Retrieves variables from functions/classes which are calling LiveScan,
+        such that current nr of pods and the nr of currently performed iterations
+        can be printed.
+        """
+        logger.info(headerline('', 'c', '°'))
+        curframe = inspect.currentframe()
+        calframe = inspect.getouterframes(curframe, 2)
+        #### print('calframe.__len__() = %d' % calframe.__len__())
+        #### try:
+        ####     for fr in range(0, calframe.__len__()):
+        ####         print(f'calframe[{fr}] = ', calframe[fr])
+        ####         print(f'calframe[{fr}][0].f_locals.keys() = \n', calframe[fr][0].f_locals.keys(), '\n')
+        #### except:
+        ####     pass
+        #print(*[(frame.lineno, frame.filename, frame.function) for frame in calframe], sep="\n")
+        try:
+            ##OnMyMac## ptychoframe = [frame.filename for frame in calframe].index('/opt/anaconda3/envs/Contrast_PtyPyLive_v1/lib/python3.7/site-packages/ptypy/core/ptycho.py') ## or '/opt/anaconda3/envs/ptypy_contrast_NM-utils/lib/python3.7/site-packages/ptypy/core/ptycho.py'   or  '/opt/anaconda3/envs/Contrast_PtyPyLive_v1/lib/python3.7/site-packages/ptypy/core/ptycho.py'   or  '/Users/lexelius/Documents/PtyPy/ptypy-master/ptypy/core/ptycho.py'
+            ptychoframe = [frame.filename for frame in calframe].index(ptypy.core.ptycho.__file__)
+            ptycho_self = calframe[ptychoframe][0].f_locals['self']
+            #### ptycho_self.print_stats()
+            active_pods = sum(1 for pod in ptycho_self.pods.values() if pod.active)
+            all_pods = len(ptycho_self.pods.values())
+            print(f'---- Total Pods {all_pods} ({active_pods} active) ----')
+            # if calframe[ptychoframe].function == 'run': ###
+            #     pdb.set_trace()
+        except:
+            pass
+        if calframe[ptychoframe].function == 'run':# and calframe[7].lineno == 632:
+            ptycho_engine = calframe[ptychoframe][0].f_locals['engine']
+            print('ptycho_engine.curiter = ', ptycho_engine.curiter)
+        if fname != None:
+            with open(fname, 'a') as f1:
+                if extra != {}:
+                    f1.write(f'{extra}, \n')
+                f1.write(f'Total Pods: {all_pods} ({active_pods} active), \n')
+                try:
+                    f1.write(f'Iteration:  {ptycho_engine.curiter}, \n\n')
+                except:
+                    pass
+        if plotlog != None:
+            if ptycho_self.interactor != None:
+                self.interaction_started = True
+                addr = ptycho_self.interactor.address
+                port = ptycho_self.interactor.port
+                print('++++++++++++++++ ptycho_self ++++++++++++++++')
+                print(f'Connected to :::::: {addr}:{port}')
+                print('+++++++++++++++++++++++++++++++++++++++++++++')
+                print(f'writing to {plotlog}')
+                with open(plotlog, 'w') as f2:
+                    f2.write(f'address={addr}\nport={port}\ntime={time.strftime("%H:%M:%S", time.localtime())}') ##\n
+
+
+        logger.info(headerline('', 'c', '°') + '\n')
+
 
