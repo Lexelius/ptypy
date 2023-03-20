@@ -263,14 +263,16 @@ class LiveScan(PtyScan):
     help = Load a fixed number of frames in between each iteration
 
     [crop_at_RS]
-    default = True
-    type = bool
-    help = Crop at the RelayServer instead of in PtyPy
+    default = None
+    type = int, tuple
+    help = Cropping dimension of the diffraction, performed in the RelayServer.
+      Can be None, (dimx, dimy), or dim. In the latter case shape will be (dim, dim).
 
     [rebin_at_RS]
-    default = True
-    type = bool
-    help = Rebin at the RelayServer instead of in PtyPy
+    default = None
+    type = int
+    help = Rebinning factor for the raw data frames used by the RelayServer.
+      ``'None'`` or ``1`` both mean *no binning*
     """
 
 
@@ -283,7 +285,7 @@ class LiveScan(PtyScan):
         p.update(pars)
         p.update(kwargs)
 
-        super(LiveScan, self).__init__(p, **kwargs)
+        super(LiveScan, self).__init__(p, **kwargs) # To get the parent of LiveScan, e.g. PtyScan
 
         # main socket: reporting images, positions and motor stuff from RelayServer
         self.context = zmq.Context()
@@ -306,12 +308,13 @@ class LiveScan(PtyScan):
 
         self.p = p
         # !#
-        if self.info.crop_at_RS:
-            self.preprocess_RS['shape'] = self.p.shape
+        if self.info.crop_at_RS is not None:
+            self.preprocess_RS['shape'] = self.info.crop_at_RS
             self.preprocess_RS['center'] = self.p.center
-        if self.info.rebin_at_RS and self.p.rebin is not None and (self.p.rebin != 1):
-            self.preprocess_RS['rebin'] = self.p.rebin
+        if self.info.rebin_at_RS is not None and self.info.rebin_at_RS != 1:
+            self.preprocess_RS['rebin'] = self.info.rebin_at_RS
         ## Implement background subtraction
+        ## ...
         self.socket.send_json(['preprocess', self.preprocess_RS])
         self.socket.recv_json()
         # !#
@@ -503,13 +506,13 @@ class LiveScan(PtyScan):
                 # Maybe not the best solution to let rebin_at_RS be of type bool,
                 # since the only way of seeing the rebinning factor used in RS is
                 # to compare the shapes in meta and info of the .ptyd file..
-                self.info.shape = u.expect2(self.info.shape) // self.info.rebin
+                self.info.shape = u.expect2(self.info.shape) // self.info.rebin_at_RS
                 if self.info.psize is not None:
-                    self.meta.psize = u.expect2(self.info.psize) * self.info.rebin
-                self.rebin = 1
-            else:
-                # Setting this to False to get correct info when writing to .ptyd
-                self.info.rebin_at_RS = False
+                    self.meta.psize = u.expect2(self.info.psize) * self.info.rebin_at_RS
+            #     self.rebin = 1
+            # else:
+            #     # Setting this to False to get correct info when writing to .ptyd
+            #     self.info.rebin_at_RS = False
 
         if self.info.rebin_at_RS:
             # Then imgs contain both diff and weights.
