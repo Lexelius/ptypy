@@ -319,7 +319,11 @@ class LiveScan(PtyScan):
         self.socket.recv_json()
         # !#
 
-        self.BT_fname = re.sub(r'(.*/).*/.*', rf'\1backtrace_{time.strftime("%F_%H:%M:%S", time.localtime())}.txt', self.p.dfile)
+        try:
+            self.BT_fname = re.sub(r'(.*/).*/.*', rf'\1backtrace_{time.strftime("%F_%H:%M:%S", time.localtime())}.txt', self.p.dfile)
+        except:
+            self.BT_fname = None
+            print("Warning: Couldn't write a backtrace-file.")
         self.BT_logfname = '/data/staff/nanomax/commissioning_2022-2/reblex/interaction_log.txt'##'/mxn/home/reblex/interaction_log.txt' # Will have to be updated on official release.
 
         logger.info(headerline('', 'c', '#'))
